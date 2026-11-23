@@ -1,0 +1,5 @@
+streamlit>=1.50
+plotly>=5.20
+segno>=1.6
+gspread>=6.0
+Pillow>=10
