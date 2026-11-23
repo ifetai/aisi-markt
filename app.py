@@ -201,11 +201,12 @@ class Store:
 
 
 @st.cache_resource
-def get_store():
+def get_store(version):
     return Store()
 
 
-STORE = get_store()
+# Version erhoehen, wenn sich die Klasse Store aendert: dann wird der Speicher neu angelegt
+STORE = get_store(2)
 
 
 # ---------- Hilfsfunktionen ----------
@@ -466,7 +467,7 @@ def mixed(ids):
 @st.fragment(run_every="4s")
 def results():
     stt = STORE.stats()
-    reveal = STORE.reveal
+    reveal = getattr(STORE, "reveal", False)
 
     # ---------- Runde 1 ----------
     by_id = {x["id"]: x for x in stt["r1"]}
@@ -598,7 +599,7 @@ def admin():
         STORE.reveal = st.session_state.reveal_toggle
 
     st.toggle("Auflösung auf dem Grossbildschirm zeigen (Urteil des Fachs und tatsächliche Rissbreiten)",
-              value=STORE.reveal, key="reveal_toggle", on_change=set_reveal)
+              value=getattr(STORE, "reveal", False), key="reveal_toggle", on_change=set_reveal)
     st.caption("Standard ist aus: Der Bildschirm zeigt nur, wie das Publikum geurteilt hat, damit niemand die Lösungen abschaut.")
 
     st.subheader("Runde 1 · Relevant oder nicht?")
