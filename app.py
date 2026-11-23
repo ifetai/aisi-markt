@@ -27,7 +27,7 @@ from PIL import Image
 ROOT = Path(__file__).parent
 CONTENT = ROOT / "content"
 ROUND2_PER_PERSON = 5
-RED, RED_D, NAVY, AMBER, GREY = "#EB0000", "#C00000", "#1A2B4C", "#F0A800", "#F2F2F2"
+RED, RED_D, NAVY, AMBER, GREY, GREEN = "#EB0000", "#C00000", "#1A2B4C", "#F0A800", "#F2F2F2", "#1E7B34"
 
 VIEW = st.query_params.get("view", "play")
 st.set_page_config(page_title="Erkennst du, was ein Defekt ist?", page_icon="🔎",
@@ -72,7 +72,7 @@ def load_images():
         for f in sorted(folder.iterdir()) if folder.is_dir() else []:
             if f.suffix.lower() in exts:
                 iid = f"r1-{verdict}-{f.stem}"
-                images[iid] = {"id": iid, "round": 1, "truth": verdict, "data": prepared(f), "wide": prepared(f, 800, 2.9)}
+                images[iid] = {"id": iid, "round": 1, "truth": verdict, "data": prepared(f), "thumb": prepared(f, 500, 1.4)}
                 r1.append(iid)
     folder = CONTENT / "runde2"
     for f in sorted(folder.iterdir()) if folder.is_dir() else []:
@@ -96,7 +96,6 @@ class Store:
     def __init__(self):
         self.lock = threading.Lock()
         self.answers, self.seen, self.pending = [], set(), []
-        self.screen_mode = "auto"
         self.sheet_error = None
         self.ws = self._open_sheet()
         if self.ws is not None:
@@ -379,12 +378,12 @@ def play():
         progress(s.i, len(s.round2))
         st.subheader("Wie breit ist dieser Riss?")
         st.image(IMAGES[iid]["data"], width="stretch")
-        val = s.get("slider", MAX_MM / 2) if s.moved else None
-        st.markdown(f'<p style="font-size:46px;font-weight:700;color:#1A2B4C;text-align:center;margin:0">{fmt(val) if val is not None else "?"} <span style="font-size:22px">mm</span></p>',
+        val = s.get("slider", MAX_MM / 2)
+        st.markdown(f'<p style="font-size:46px;font-weight:700;color:#1A2B4C;text-align:center;margin:0">{fmt(val)} <span style="font-size:22px">mm</span></p>',
                     unsafe_allow_html=True)
         st.slider("Schiebe den Regler auf deine Schätzung (mm)", 0.0, float(MAX_MM), step=0.1,
                   key="slider", format="%.1f", on_change=mark_moved)
-        st.button("Schätzung abgeben", type="primary", width="stretch", disabled=not s.moved,
+        st.button("Schätzung abgeben", type="primary", width="stretch",
                   on_click=answer_r2, key=f"ok{s.i}")
 
     elif ph == "r2fb":
@@ -416,128 +415,135 @@ def play():
 
 
 # =====================================================================
-# Grossbildschirm
+# Grossbildschirm: eine Seite, oben die Zahlen, darunter live beide Runden
 # =====================================================================
-VIEWS = ["start", "runde1", "runde2", "augenmass"]
-VIEW_SECONDS = 15
-
-
 def screen():
-    st.markdown('<style>.block-container{padding:1.2rem 2rem 0 2rem;max-width:100%;}'
-                'h1{font-size:2.6rem !important;}</style>', unsafe_allow_html=True)
-    main, side = st.columns([4, 1], gap="large")
+    st.markdown('<style>.block-container{padding:1.2rem 2rem 2rem 2rem;max-width:100%;}</style>', unsafe_allow_html=True)
+    top, side = st.columns([5, 1], gap="large")
     with side:
         url = join_url()
-        st.markdown(f'<div style="background:{NAVY};color:#fff;border-radius:6px;padding:18px;text-align:center">'
-                    f'<p style="font-size:26px;font-weight:700;margin:0 0 10px">Mach mit!</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="background:{NAVY};color:#fff;border-radius:6px;padding:10px;text-align:center;'
+                    f'font-size:22px;font-weight:700">Mach mit!</div>', unsafe_allow_html=True)
         st.image(qr_png(url), width="stretch")
-        st.caption(url)
-        counter()
-    with main:
-        board()
+        st.caption("QR-Code scannen und auf dem Handy mitspielen")
+    with top:
+        st.markdown('<p class="kicker" style="font-size:15px">AISI · AI in der Streckeninspektion</p>'
+                    '<h1 style="margin:0 0 4px;font-size:2.6rem">Erkennst du, was ein Defekt ist?</h1>'
+                    '<p style="font-size:20px;color:#333;margin:0 0 12px">Beurteile echte Risse in Betonschwellen, '
+                    'aufgenommen vom Messzug. Hier siehst du live, wie alle geurteilt haben.</p>', unsafe_allow_html=True)
+        kpis()
+    results()
 
 
-@st.fragment(run_every="3s")
-def counter():
-    n = STORE.stats()["participants"]
-    st.markdown(f'<p style="font-size:64px;font-weight:700;color:{AMBER};margin:0;text-align:center;line-height:1">{n}</p>'
-                f'<p style="text-align:center;margin:0">haben mitgemacht</p>', unsafe_allow_html=True)
+def card(value, label):
+    return (f'<div class="card" style="padding:20px 22px"><p style="font-size:52px;font-weight:700;color:{NAVY};'
+            f'margin:0;line-height:1">{value}</p><p style="font-size:19px;margin:6px 0 0">{label}</p></div>')
 
 
-@st.fragment(run_every="5s")
-def board():
+@st.fragment(run_every="4s")
+def kpis():
     stt = STORE.stats()
-    mode = STORE.screen_mode
-    now = int(time.time())
-    view = VIEWS[(now // VIEW_SECONDS) % len(VIEWS)] if mode == "auto" else mode
+    r1n = sum(x["relevant"] + x["irrelevant"] for x in stt["r1"])
+    r2n = sum(len(x["values"]) for x in stt["r2"])
+    c = st.columns(3)
+    c[0].markdown(card(stt["participants"], "Personen haben mitgemacht"), unsafe_allow_html=True)
+    c[1].markdown(card(r1n, "Risse beurteilt (Runde 1)"), unsafe_allow_html=True)
+    c[2].markdown(card(r2n, "Rissbreiten geschätzt (Runde 2)"), unsafe_allow_html=True)
 
-    def head(kicker, title, sub=""):
-        st.markdown(f'<p class="kicker" style="font-size:15px">{kicker}</p>', unsafe_allow_html=True)
-        st.markdown(f'<h1 style="margin:0 0 4px">{title}</h1>', unsafe_allow_html=True)
-        if sub:
-            st.markdown(f'<p style="font-size:20px;color:#333;margin:0 0 12px">{sub}</p>', unsafe_allow_html=True)
 
-    if view == "start":
-        r1n = sum(x["relevant"] + x["irrelevant"] for x in stt["r1"])
-        r2n = sum(len(x["values"]) for x in stt["r2"])
-        head("AISI · AI in der Streckeninspektion", "Erkennst du, was ein Defekt ist?",
-             "Beurteile echte Risse in Betonschwellen, aufgenommen vom Messzug. Scanne den QR-Code mit deinem Handy.")
-        cols = st.columns(3)
-        for c, (v, l) in zip(cols, [(stt["participants"], "Personen haben mitgemacht"), (r1n, "Risse beurteilt"),
-                                     (r2n, "Rissbreiten geschätzt")]):
-            c.markdown(f'<div class="card" style="padding:28px 22px"><p style="font-size:64px;font-weight:700;color:{NAVY};'
-                       f'margin:0;line-height:1">{v}</p><p style="font-size:20px;margin:6px 0 0">{l}</p></div>',
-                       unsafe_allow_html=True)
+def section(title, sub):
+    st.markdown(f'<h2 style="margin:28px 0 2px;font-size:2rem;border-top:3px solid {NAVY};padding-top:16px">{title}</h2>'
+                f'<p style="font-size:19px;color:#333;margin:0 0 12px">{sub}</p>', unsafe_allow_html=True)
 
-    elif view == "runde1":
-        head("Runde 1 · Relevant oder nicht?", "So urteilt das Publikum",
-             "Je näher an 50 zu 50, desto uneiniger sind wir. Genau solche Bilder machen es auch einem Modell schwer.")
-        items = []
-        for x in stt["r1"]:
-            n = x["relevant"] + x["irrelevant"]
-            p = pct(x["relevant"], n)
-            items.append({**x, "n": n, "p": p, "agree": max(p, 100 - p) if n else 101})
-        items.sort(key=lambda x: x["agree"])
-        hot = items[0]["id"] if items and items[0]["n"] >= 3 else None
-        for row in range(0, len(items), 3):
-            cols = st.columns(3)
-            for c, x in zip(cols, items[row:row + 3]):
-                with c:
-                    st.image(IMAGES[x["id"]]["wide"], width="stretch")
-                    color = RED_D if x["truth"] == "relevant" else NAVY
-                    badge = (f' <span class="tag" style="background:{AMBER};color:#1F1F1F">Am umstrittensten</span>'
-                             if x["id"] == hot else "")
-                    bar = split_bar(x["p"], height=26, font=13) if x["n"] else ""
-                    st.markdown(f'<div style="margin:-8px 0 10px"><span class="tag" style="background:{color}">'
-                                f'Fach: {"relevant" if x["truth"] == "relevant" else "nicht relevant"}</span>{badge}'
-                                f'<div style="margin-top:6px">{bar}</div><p style="color:#555;font-size:13px;margin:4px 0 0">'
-                                f'{x["n"]} {"Antwort" if x["n"] == 1 else "Antworten"}</p></div>', unsafe_allow_html=True)
 
-    elif view == "runde2":
-        items = [x for x in stt["r2"] if x["values"]]
-        head("Runde 2 · Wie breit ist der Riss?", "Augenmass gegen Messung",
-             "Jeder Balken zeigt, wie viele so geschätzt haben. Rot ist die tatsächliche Rissbreite.")
-        if not items:
-            st.info("Noch keine Schätzungen. Mach den Anfang!")
-            return
-        x = items[(now // 8) % len(items)]
-        c1, c2 = st.columns([1.2, 1])
-        c1.image(IMAGES[x["id"]]["data"], width="stretch")
-        mean = sum(x["values"]) / len(x["values"])
-        fig = go.Figure(go.Histogram(x=x["values"], xbins=dict(start=0, end=MAX_MM, size=0.25), marker_color=NAVY,
-                                     name="Schätzungen"))
-        fig.add_vline(x=x["truth"], line_color=RED, line_width=5,
-                      annotation_text=f"Rissbreite {fmt(x['truth'])} mm", annotation_font=dict(color=RED_D, size=18))
-        fig.add_vline(x=mean, line_color=AMBER, line_width=4, line_dash="dash",
-                      annotation_text=f"Publikum {fmt(mean)} mm", annotation_position="bottom right",
-                      annotation_font=dict(color="#8A6200", size=16))
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=40), plot_bgcolor="white", bargap=0.08,
-                          xaxis=dict(range=[0, MAX_MM], title="Schätzung in mm", dtick=1), yaxis=dict(title="Anzahl", gridcolor="#E3E3E3"),
-                          font=dict(family="Arial", size=16), showlegend=False)
-        c2.plotly_chart(fig, config={"displayModeBar": False, "staticPlot": True}, key=f"h{now}")
+@st.fragment(run_every="4s")
+def results():
+    stt = STORE.stats()
 
-    elif view == "augenmass":
-        items = [x for x in stt["r2"] if x["values"]]
-        errs = [abs(v - x["truth"]) for x in items for v in x["values"]]
-        head("Gesamtbild", "Wie gut ist unser Augenmass?",
-             f"Im Schnitt liegen wir <b>{fmt(sum(errs) / len(errs))} mm</b> daneben. Auf der Diagonalen wäre jede Schätzung genau richtig."
-             if errs else "")
-        if not items:
-            st.info("Sobald Schätzungen da sind, erscheint hier das Gesamtbild.")
-            return
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=[0, MAX_MM], y=[0, MAX_MM], mode="lines", line=dict(color="#1F1F1F", dash="dash", width=2),
-                                 name="genau richtig"))
-        fig.add_trace(go.Scatter(x=[x["truth"] for x in items for _ in x["values"]], y=[v for x in items for v in x["values"]],
-                                 mode="markers", marker=dict(color=NAVY, opacity=0.3, size=9), name="einzelne Schätzung"))
-        fig.add_trace(go.Scatter(x=[x["truth"] for x in items], y=[sum(x["values"]) / len(x["values"]) for x in items],
-                                 mode="markers", marker=dict(color=RED, size=16, line=dict(color="white", width=2)),
-                                 name="Mittelwert pro Riss"))
-        fig.update_layout(height=560, margin=dict(l=10, r=10, t=10, b=40), plot_bgcolor="white",
-                          xaxis=dict(range=[0, MAX_MM], title="Tatsächliche Rissbreite in mm", dtick=1, gridcolor="#E3E3E3"),
-                          yaxis=dict(range=[0, MAX_MM], title="Geschätzt in mm", dtick=1, gridcolor="#E3E3E3"),
-                          font=dict(family="Arial", size=16), legend=dict(orientation="h", y=1.08))
-        st.plotly_chart(fig, config={"displayModeBar": False, "staticPlot": True}, key=f"a{now}")
+    # ---------- Runde 1 ----------
+    items = []
+    for x in stt["r1"]:
+        n = x["relevant"] + x["irrelevant"]
+        p = pct(x["relevant"], n)
+        majority = None if n == 0 or p == 50 else ("relevant" if p > 50 else "irrelevant")
+        items.append({**x, "n": n, "p": p, "majority": majority})
+    judged = [x for x in items if x["n"]]
+    agree_all = sum(x["relevant"] if x["truth"] == "relevant" else x["irrelevant"] for x in judged)
+    total = sum(x["n"] for x in judged)
+    contested = min(judged, key=lambda x: abs(x["p"] - 50)) if judged else None
+    sub = ("Noch keine Antworten." if not total else
+           f"<b>{pct(agree_all, total)} %</b> aller Urteile stimmen mit dem Fach überein. "
+           f"Je näher ein Balken an 50 zu 50 ist, desto uneiniger ist das Publikum. Genau solche Bilder machen es auch einem Modell schwer.")
+    section("Runde 1 · Ist der Riss relevant?", sub)
+    st.markdown(f'<p style="font-size:16px;margin:0 0 8px"><span class="tag" style="background:{RED_D}">relevant</span> '
+                f'<span class="tag" style="background:{NAVY}">nicht relevant</span> &nbsp;Balken = Anteil der Antworten des Publikums. '
+                f'Etikett oben = Urteil des Fachs.</p>', unsafe_allow_html=True)
+    cols = st.columns(len(items)) if items else []
+    for c, x in zip(cols, items):
+        with c:
+            st.image(IMAGES[x["id"]]["thumb"], width="stretch")
+            fach = "relevant" if x["truth"] == "relevant" else "nicht relevant"
+            color = RED_D if x["truth"] == "relevant" else NAVY
+            if x["n"]:
+                bar = (f'<div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin:6px 0 4px">'
+                       f'<div style="width:{x["p"]}%;background:{RED_D}"></div><div style="width:{100 - x["p"]}%;background:{NAVY}"></div></div>'
+                       f'<p style="margin:0;font-size:14px;line-height:1.35"><b style="color:{RED_D}">{x["p"]} %</b> relevant<br>'
+                       f'<b style="color:{NAVY}">{100 - x["p"]} %</b> nicht relevant</p>')
+                if x["majority"] is None:
+                    verdict = '<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:#8A6200">Unentschieden</p>'
+                elif x["majority"] == x["truth"]:
+                    verdict = f'<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:{GREEN}">✓ Mehrheit wie Fach</p>'
+                else:
+                    verdict = f'<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:{RED_D}">✗ Mehrheit anders als Fach</p>'
+            else:
+                bar, verdict = '<p style="margin:6px 0 0;font-size:14px;color:#555">noch keine Antworten</p>', ""
+            hot = (f'<p style="margin:4px 0 0"><span class="tag" style="background:{AMBER};color:#1F1F1F;font-size:12px">'
+                   f'Am umstrittensten</span></p>' if contested and x["id"] == contested["id"] and x["n"] >= 3 else "")
+            st.markdown(f'<div style="margin-top:-6px"><span class="tag" style="background:{color};font-size:12px">Fach: {fach}</span>'
+                        f'{bar}{verdict}<p style="margin:2px 0 0;font-size:13px;color:#555">{x["n"]} '
+                        f'{"Antwort" if x["n"] == 1 else "Antworten"}</p>{hot}</div>', unsafe_allow_html=True)
+
+    # ---------- Runde 2 ----------
+    r2 = sorted(stt["r2"], key=lambda x: x["truth"])
+    est = [x for x in r2 if x["values"]]
+    errs = [abs(v - x["truth"]) for x in est for v in x["values"]]
+    sub = ("Noch keine Schätzungen." if not errs else
+           f"Im Schnitt liegen die Schätzungen <b>{fmt(sum(errs) / len(errs))} mm</b> neben der tatsächlichen Breite "
+           f"({len(errs)} Schätzungen). Jede Spalte ist ein Riss: Rot ist die tatsächliche Breite, "
+           f"die blauen Punkte sind die Schätzungen, der orange Strich ist ihr Mittelwert.")
+    section("Runde 2 · Wie breit ist der Riss?", sub)
+    if not r2:
+        return
+    xs = list(range(1, len(r2) + 1))
+    labels = [f"Riss {i}<br>{fmt(x['truth'])} mm" for i, x in zip(xs, r2)]
+    fig = go.Figure()
+    # Abstand zwischen Mittelwert und Wahrheit als graue Linie
+    for i, x in zip(xs, r2):
+        if x["values"]:
+            m = sum(x["values"]) / len(x["values"])
+            fig.add_trace(go.Scatter(x=[i, i], y=[x["truth"], m], mode="lines", line=dict(color="#B0B0B0", width=3),
+                                     showlegend=False, hoverinfo="skip"))
+    rng = random.Random(7)
+    fig.add_trace(go.Scatter(x=[i + rng.uniform(-0.18, 0.18) for i, x in zip(xs, r2) for _ in x["values"]],
+                             y=[v for x in r2 for v in x["values"]], mode="markers", name="Schätzung einer Person",
+                             marker=dict(color=NAVY, opacity=0.65, size=10)))
+    fig.add_trace(go.Scatter(x=[i for i, x in zip(xs, r2) if x["values"]],
+                             y=[sum(x["values"]) / len(x["values"]) for x in r2 if x["values"]],
+                             mode="markers", name="Mittelwert Publikum",
+                             marker=dict(color=AMBER, symbol="line-ew", size=34, line=dict(color=AMBER, width=5))))
+    fig.add_trace(go.Scatter(x=xs, y=[x["truth"] for x in r2], mode="markers", name="Tatsächliche Rissbreite",
+                             marker=dict(color=RED, symbol="diamond", size=15, line=dict(color="white", width=1.5))))
+    fig.update_layout(
+        height=520, margin=dict(l=70, r=20, t=50, b=90), plot_bgcolor="white",
+        font=dict(family="Arial", size=16, color="#1F1F1F"),
+        legend=dict(orientation="h", x=0, y=1.1, font=dict(size=17)),
+        xaxis=dict(tickmode="array", tickvals=xs, ticktext=labels, range=[0.4, len(r2) + 0.6],
+                   title=dict(text="Die Risse, sortiert nach tatsächlicher Breite", font=dict(size=17)), showgrid=False,
+                   tickfont=dict(size=14, color="#1F1F1F")),
+        yaxis=dict(range=[0, MAX_MM + 0.2], dtick=1, gridcolor="#E3E3E3", zeroline=False,
+                   title=dict(text="Rissbreite in mm", font=dict(size=17)), tickfont=dict(size=15, color="#1F1F1F")),
+    )
+    st.plotly_chart(fig, theme=None, config={"displayModeBar": False, "staticPlot": True}, key="r2chart")
 
 
 # =====================================================================
@@ -556,14 +562,7 @@ def admin():
     if STORE.sheet_error:
         st.warning(f"Google Sheets: {STORE.sheet_error}")
 
-    st.subheader("Grossbildschirm")
-    modes = {"auto": "Automatisch", "start": "Start", "runde1": "Runde 1", "runde2": "Runde 2", "augenmass": "Augenmass"}
-    def set_mode():
-        STORE.screen_mode = st.session_state.mode
-
-    st.radio("Ansicht", list(modes), index=list(modes).index(STORE.screen_mode), key="mode",
-             format_func=modes.get, horizontal=True, on_change=set_mode)
-    st.caption(f"Bildschirm: {join_url()}?view=screen (im Browser mit F11 auf Vollbild)")
+    st.caption(f"Grossbildschirm: {join_url()}?view=screen (im Browser mit F11 auf Vollbild)")
 
     st.subheader("Runde 1 · Relevant oder nicht?")
     st.dataframe([{"Bild": x["id"], "Fach": x["truth"], "relevant": x["relevant"], "nicht relevant": x["irrelevant"],
