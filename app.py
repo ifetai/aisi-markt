@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -96,6 +97,7 @@ class Store:
     def __init__(self):
         self.lock = threading.Lock()
         self.answers, self.seen, self.pending = [], set(), []
+        self.reveal = False  # Aufloesung auf dem Grossbildschirm zeigen
         self.sheet_error = None
         self.ws = self._open_sheet()
         if self.ws is not None:
@@ -456,73 +458,99 @@ def section(title, sub):
                 f'<p style="font-size:19px;color:#333;margin:0 0 12px">{sub}</p>', unsafe_allow_html=True)
 
 
+def mixed(ids):
+    """Feste, gemischte Reihenfolge, damit die Anordnung nichts verraet (nicht nach Fach oder Breite sortiert)."""
+    return sorted(ids, key=lambda i: zlib.crc32(("aisi-" + i).encode()))
+
+
 @st.fragment(run_every="4s")
 def results():
     stt = STORE.stats()
+    reveal = STORE.reveal
 
     # ---------- Runde 1 ----------
+    by_id = {x["id"]: x for x in stt["r1"]}
     items = []
-    for x in stt["r1"]:
+    for k, iid in enumerate(mixed(list(by_id)), start=1):
+        x = by_id[iid]
         n = x["relevant"] + x["irrelevant"]
         p = pct(x["relevant"], n)
         majority = None if n == 0 or p == 50 else ("relevant" if p > 50 else "irrelevant")
-        items.append({**x, "n": n, "p": p, "majority": majority})
+        items.append({**x, "nr": k, "n": n, "p": p, "majority": majority})
     judged = [x for x in items if x["n"]]
-    agree_all = sum(x["relevant"] if x["truth"] == "relevant" else x["irrelevant"] for x in judged)
     total = sum(x["n"] for x in judged)
     contested = min(judged, key=lambda x: abs(x["p"] - 50)) if judged else None
-    sub = ("Noch keine Antworten." if not total else
-           f"<b>{pct(agree_all, total)} %</b> aller Urteile stimmen mit dem Fach überein. "
-           f"Je näher ein Balken an 50 zu 50 ist, desto uneiniger ist das Publikum. Genau solche Bilder machen es auch einem Modell schwer.")
+    if not total:
+        sub = "Noch keine Antworten."
+    elif reveal:
+        agree_all = sum(x["relevant"] if x["truth"] == "relevant" else x["irrelevant"] for x in judged)
+        sub = (f"<b>{pct(agree_all, total)} %</b> aller Urteile stimmen mit dem Fach überein. "
+               "Je näher ein Balken an 50 zu 50 ist, desto uneiniger ist das Publikum. Genau solche Bilder machen es auch einem Modell schwer.")
+    else:
+        sub = ("Je näher ein Balken an 50 zu 50 ist, desto uneiniger ist das Publikum. "
+               "Genau solche Bilder machen es auch einem Modell schwer.")
     section("Runde 1 · Ist der Riss relevant?", sub)
+    legend = ("Balken = Anteil der Antworten des Publikums. Etikett oben = Urteil des Fachs." if reveal else
+              "Balken = Anteil der Antworten des Publikums. Wie das Fach entschieden hat, siehst du auf deinem Handy, nachdem du geantwortet hast.")
     st.markdown(f'<p style="font-size:16px;margin:0 0 8px"><span class="tag" style="background:{RED_D}">relevant</span> '
-                f'<span class="tag" style="background:{NAVY}">nicht relevant</span> &nbsp;Balken = Anteil der Antworten des Publikums. '
-                f'Etikett oben = Urteil des Fachs.</p>', unsafe_allow_html=True)
+                f'<span class="tag" style="background:{NAVY}">nicht relevant</span> &nbsp;{legend}</p>', unsafe_allow_html=True)
     cols = st.columns(len(items)) if items else []
     for c, x in zip(cols, items):
         with c:
             st.image(IMAGES[x["id"]]["thumb"], width="stretch")
-            fach = "relevant" if x["truth"] == "relevant" else "nicht relevant"
-            color = RED_D if x["truth"] == "relevant" else NAVY
+            if reveal:
+                fach = "relevant" if x["truth"] == "relevant" else "nicht relevant"
+                color = RED_D if x["truth"] == "relevant" else NAVY
+                top = f'<span class="tag" style="background:{color};font-size:12px">Fach: {fach}</span>'
+            else:
+                top = f'<span class="tag" style="background:#555;font-size:12px">Bild {x["nr"]}</span>'
+            verdict = ""
             if x["n"]:
                 bar = (f'<div style="display:flex;height:16px;border-radius:3px;overflow:hidden;margin:6px 0 4px">'
                        f'<div style="width:{x["p"]}%;background:{RED_D}"></div><div style="width:{100 - x["p"]}%;background:{NAVY}"></div></div>'
                        f'<p style="margin:0;font-size:14px;line-height:1.35"><b style="color:{RED_D}">{x["p"]} %</b> relevant<br>'
                        f'<b style="color:{NAVY}">{100 - x["p"]} %</b> nicht relevant</p>')
-                if x["majority"] is None:
-                    verdict = '<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:#8A6200">Unentschieden</p>'
-                elif x["majority"] == x["truth"]:
-                    verdict = f'<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:{GREEN}">✓ Mehrheit wie Fach</p>'
-                else:
-                    verdict = f'<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:{RED_D}">✗ Mehrheit anders als Fach</p>'
+                if reveal:
+                    if x["majority"] is None:
+                        verdict = '<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:#8A6200">Unentschieden</p>'
+                    elif x["majority"] == x["truth"]:
+                        verdict = f'<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:{GREEN}">✓ Mehrheit wie Fach</p>'
+                    else:
+                        verdict = f'<p style="margin:4px 0 0;font-size:14px;font-weight:700;color:{RED_D}">✗ Mehrheit anders als Fach</p>'
             else:
-                bar, verdict = '<p style="margin:6px 0 0;font-size:14px;color:#555">noch keine Antworten</p>', ""
+                bar = '<p style="margin:6px 0 0;font-size:14px;color:#555">noch keine Antworten</p>'
             hot = (f'<p style="margin:4px 0 0"><span class="tag" style="background:{AMBER};color:#1F1F1F;font-size:12px">'
                    f'Am umstrittensten</span></p>' if contested and x["id"] == contested["id"] and x["n"] >= 3 else "")
-            st.markdown(f'<div style="margin-top:-6px"><span class="tag" style="background:{color};font-size:12px">Fach: {fach}</span>'
-                        f'{bar}{verdict}<p style="margin:2px 0 0;font-size:13px;color:#555">{x["n"]} '
-                        f'{"Antwort" if x["n"] == 1 else "Antworten"}</p>{hot}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="margin-top:-6px">{top}{bar}{verdict}<p style="margin:2px 0 0;font-size:13px;color:#555">'
+                        f'{x["n"]} {"Antwort" if x["n"] == 1 else "Antworten"}</p>{hot}</div>', unsafe_allow_html=True)
 
     # ---------- Runde 2 ----------
-    r2 = sorted(stt["r2"], key=lambda x: x["truth"])
-    est = [x for x in r2 if x["values"]]
-    errs = [abs(v - x["truth"]) for x in est for v in x["values"]]
-    sub = ("Noch keine Schätzungen." if not errs else
-           f"Im Schnitt liegen die Schätzungen <b>{fmt(sum(errs) / len(errs))} mm</b> neben der tatsächlichen Breite "
-           f"({len(errs)} Schätzungen). Jede Spalte ist ein Riss: Rot ist die tatsächliche Breite, "
-           f"die blauen Punkte sind die Schätzungen, der orange Strich ist ihr Mittelwert.")
+    by_id = {x["id"]: x for x in stt["r2"]}
+    r2 = sorted(stt["r2"], key=lambda x: x["truth"]) if reveal else [by_id[i] for i in mixed(list(by_id))]
+    n_est = sum(len(x["values"]) for x in r2)
+    errs = [abs(v - x["truth"]) for x in r2 for v in x["values"]]
+    if not n_est:
+        sub = "Noch keine Schätzungen."
+    elif reveal:
+        sub = (f"Im Schnitt liegen die Schätzungen <b>{fmt(sum(errs) / len(errs))} mm</b> neben der tatsächlichen Breite "
+               f"({n_est} Schätzungen). Jede Spalte ist ein Riss: Rot ist die tatsächliche Breite, "
+               "die blauen Punkte sind die Schätzungen, der orange Strich ist ihr Mittelwert.")
+    else:
+        sub = (f"So unterschiedlich schätzen wir ({n_est} Schätzungen). Jede Spalte ist ein Riss: Die blauen Punkte sind die "
+               "Schätzungen, der orange Strich ist ihr Mittelwert. Je weiter die Punkte auseinanderliegen, desto uneiniger sind wir. "
+               "Die tatsächliche Breite siehst du auf deinem Handy, nachdem du geschätzt hast.")
     section("Runde 2 · Wie breit ist der Riss?", sub)
     if not r2:
         return
     xs = list(range(1, len(r2) + 1))
-    labels = [f"Riss {i}<br>{fmt(x['truth'])} mm" for i, x in zip(xs, r2)]
+    labels = [f"Riss {i}<br>{fmt(x['truth'])} mm" if reveal else f"Riss {i}" for i, x in zip(xs, r2)]
     fig = go.Figure()
-    # Abstand zwischen Mittelwert und Wahrheit als graue Linie
-    for i, x in zip(xs, r2):
-        if x["values"]:
-            m = sum(x["values"]) / len(x["values"])
-            fig.add_trace(go.Scatter(x=[i, i], y=[x["truth"], m], mode="lines", line=dict(color="#B0B0B0", width=3),
-                                     showlegend=False, hoverinfo="skip"))
+    if reveal:  # Abstand zwischen Mittelwert und Wahrheit als graue Linie
+        for i, x in zip(xs, r2):
+            if x["values"]:
+                m = sum(x["values"]) / len(x["values"])
+                fig.add_trace(go.Scatter(x=[i, i], y=[x["truth"], m], mode="lines", line=dict(color="#B0B0B0", width=3),
+                                         showlegend=False, hoverinfo="skip"))
     rng = random.Random(7)
     fig.add_trace(go.Scatter(x=[i + rng.uniform(-0.18, 0.18) for i, x in zip(xs, r2) for _ in x["values"]],
                              y=[v for x in r2 for v in x["values"]], mode="markers", name="Schätzung einer Person",
@@ -531,17 +559,19 @@ def results():
                              y=[sum(x["values"]) / len(x["values"]) for x in r2 if x["values"]],
                              mode="markers", name="Mittelwert Publikum",
                              marker=dict(color=AMBER, symbol="line-ew", size=34, line=dict(color=AMBER, width=5))))
-    fig.add_trace(go.Scatter(x=xs, y=[x["truth"] for x in r2], mode="markers", name="Tatsächliche Rissbreite",
-                             marker=dict(color=RED, symbol="diamond", size=15, line=dict(color="white", width=1.5))))
+    if reveal:
+        fig.add_trace(go.Scatter(x=xs, y=[x["truth"] for x in r2], mode="markers", name="Tatsächliche Rissbreite",
+                                 marker=dict(color=RED, symbol="diamond", size=15, line=dict(color="white", width=1.5))))
     fig.update_layout(
         height=520, margin=dict(l=70, r=20, t=50, b=90), plot_bgcolor="white",
         font=dict(family="Arial", size=16, color="#1F1F1F"),
         legend=dict(orientation="h", x=0, y=1.1, font=dict(size=17)),
         xaxis=dict(tickmode="array", tickvals=xs, ticktext=labels, range=[0.4, len(r2) + 0.6],
-                   title=dict(text="Die Risse, sortiert nach tatsächlicher Breite", font=dict(size=17)), showgrid=False,
-                   tickfont=dict(size=14, color="#1F1F1F")),
+                   title=dict(text="Die Risse, sortiert nach tatsächlicher Breite" if reveal else "Die Risse", font=dict(size=17)),
+                   showgrid=False, tickfont=dict(size=14, color="#1F1F1F")),
         yaxis=dict(range=[0, MAX_MM + 0.2], dtick=1, gridcolor="#E3E3E3", zeroline=False,
-                   title=dict(text="Rissbreite in mm", font=dict(size=17)), tickfont=dict(size=15, color="#1F1F1F")),
+                   title=dict(text="Geschätzte Rissbreite in mm" if not reveal else "Rissbreite in mm", font=dict(size=17)),
+                   tickfont=dict(size=15, color="#1F1F1F")),
     )
     st.plotly_chart(fig, theme=None, config={"displayModeBar": False, "staticPlot": True}, key="r2chart")
 
@@ -563,6 +593,13 @@ def admin():
         st.warning(f"Google Sheets: {STORE.sheet_error}")
 
     st.caption(f"Grossbildschirm: {join_url()}?view=screen (im Browser mit F11 auf Vollbild)")
+
+    def set_reveal():
+        STORE.reveal = st.session_state.reveal_toggle
+
+    st.toggle("Auflösung auf dem Grossbildschirm zeigen (Urteil des Fachs und tatsächliche Rissbreiten)",
+              value=STORE.reveal, key="reveal_toggle", on_change=set_reveal)
+    st.caption("Standard ist aus: Der Bildschirm zeigt nur, wie das Publikum geurteilt hat, damit niemand die Lösungen abschaut.")
 
     st.subheader("Runde 1 · Relevant oder nicht?")
     st.dataframe([{"Bild": x["id"], "Fach": x["truth"], "relevant": x["relevant"], "nicht relevant": x["irrelevant"],
